@@ -9,9 +9,9 @@ class KLDLoss(object) :
         
     def loss(self, mask, mu0, lsgm0, mu1=None, lsgm1=None) :
         if mu1 is None and lsgm1 is None :
-            return self._KLD_zero(mu0, lsgm0, mask)
+            return self._KLD_zero(mask, mu0, lsgm0)
         else :
-            return self._KLD(mu0, lsgm0, mu1, lsgm1, mask)
+            return self._KLD(mask, mu0, lsgm0, mu1, lsgm1)
         
         
     def _KLD(self, mask, mu0, lsgm0, mu1, lsgm1):
@@ -27,12 +27,11 @@ class KLDLoss(object) :
             kld : Tensor(batch_size, n_max, dim_h) : KL divergence between the 2 distributions
         """
 
-
         var0 = torch.exp(lsgm0) + 1e-5
         var1 = torch.exp(lsgm1) + 1e-5
         a = torch.div(var0,var1)
         b = torch.div(torch.square(torch.sub(mu1, mu0)), var1)
-        c = torch.log(torch.div(var1,var0))
+        c = torch.log(torch.div(var1,var0) + 1e-5)
 
         kld = 0.5 * torch.sum(a + b - 1 + c, 2, keepdim=True) * mask
 
@@ -49,7 +48,6 @@ class KLDLoss(object) :
         Returns :
             kld : Tensor(batch_size, n_max, dim_h) : KLD between the input distribution and a normal gaussian
         """
-
 
         a = torch.exp(lsgm0) + torch.square(mu0)
         b = 1 + lsgm0
