@@ -3,7 +3,7 @@ import torch
 # Add underscore to internal functions
 
 class MSDScorer(object) :
-    def __init__(self, alignment_type='linear', tol=1e-5):
+    def __init__(self, alignment_type='default', tol=1e-5):
         self.alignment_type = alignment_type
         self.tol = tol
         

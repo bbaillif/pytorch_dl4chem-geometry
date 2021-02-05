@@ -2,13 +2,14 @@ import torch
 import numpy as np
 import pickle as pkl
 import copy
+import os
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-def test(model, test_loader, molsup_val, val_num_samples=10, debug=False, savepred_path=None, savepermol=False, \
-         refine_steps=0, useFF=False):
-
+def test(model, test_loader, molsup_val, val_num_samples=10, savepred_path='save_generated_mols/', savepermol=True, \
+         refine_steps=0, useFF=False, device='cpu'):
+    
     def pos_to_proximity(pos, mask):
         """ Args
                 pos : Tensor(batch_size, n_max, 3)
@@ -70,20 +71,25 @@ def test(model, test_loader, molsup_val, val_num_samples=10, debug=False, savepr
 
         return rmsd
     
+    if not os.path.exists(savepred_path) :
+        os.mkdir(savepred_path)
+    
     # val_num_samples number of conformers to draw from prior 
 
-    # val batch size is different from train batch size since we use multiple samples
-    val_batch_size = test_loader.batch_size # number of molecules to draw conformers from ; ie 2
-    n_batch_val = int(len(test_loader.dataset)/val_batch_size) # 1500 if D1_v = 3000
+    # val batch size is different from train batch size since sample each molecule {val_num_samples} times 
+    val_batch_size = test_loader.batch_size # number of molecules per batch, to draw conformers from ; ie 2
+    val_dataset_size = len(test_loader.dataset) # number of molecules in the dataset
+    n_batch_val = int(val_dataset_size/val_batch_size) # number of batch ; ie 1500 if val_dataset_size = 3000
     assert (len(test_loader.dataset) % val_batch_size == 0)
 
-    val_size = len(test_loader.dataset)
-    valscores_mean = np.zeros(val_size)
-    valscores_std = np.zeros(val_size)
+    n_max = model.n_max
+    
+    rmsds_mol_mean = np.zeros(val_dataset_size)
+    rmsds_mol_std = np.zeros(val_dataset_size)
 
     if savepred_path != None:
         if not savepermol:
-            pred_v = np.zeros(D1_v.shape[0], val_num_samples, n_max, 3)
+            PX_preds = np.zeros(val_dataset_size, val_num_samples, n_max, 3)
 
     print ("testing model...")
     model.eval()
@@ -93,10 +99,13 @@ def test(model, test_loader, molsup_val, val_num_samples=10, debug=False, savepr
         for batch_idx, batch in enumerate(test_loader):
             start_ = batch_idx * val_batch_size
             end_ = start_ + val_batch_size
-
-            print('Test batch number' + str(batch_idx))
             
             nodes, masks, edges, proximity, pos = batch #D1 D2 D3 D4 D5
+            nodes = nodes.to(device)
+            masks = masks.to(device)
+            edges = edges.to(device)
+            proximity = proximity.to(device)
+            pos = pos.to(device)
             masks = masks.unsqueeze(-1) # because dataloader squeezes the mask Tensor
             
             # repeat because we want val_batch_size (molecule) * val_num_samples (conformer per molecule)
@@ -104,15 +113,8 @@ def test(model, test_loader, molsup_val, val_num_samples=10, debug=False, savepr
             masks = torch.repeat_interleave(masks, val_num_samples, dim=0)
             edges = torch.repeat_interleave(edges, val_num_samples, dim=0)
             proximity = torch.repeat_interleave(proximity, val_num_samples, dim=0)
-
-            if debug:
-                print (i, len(test_loader))
                 
             _, _, _, _, _, PX_pred = model(nodes, masks, edges, proximity, pos)
-
-            if savepred_path != None:
-                if not savepermol:
-                    pred_v[start_:end_] = PX_pred.view(val_batch_size, val_num_samples, n_max, 3)
 
             X_pred = PX_pred
             for r in range(refine_steps):
@@ -123,32 +125,34 @@ def test(model, test_loader, molsup_val, val_num_samples=10, debug=False, savepr
                 _, _, _, _, last_X_pred, _ = model(nodes, edges, mask, pos, proximity)
                 X_pred = refine_mom * X_pred + (1-refine_mom) * last_X_pred
 
-            valrmsd=[]
+            rmsds=[]
             for j in range(X_pred.shape[0]):
                 ms_v_index = int(j / val_num_samples) + start_
                 rmsd = getRMSD(molsup_val[ms_v_index], X_pred[j], useFF)
-                valrmsd.append(rmsd)
+                rmsds.append(rmsd)
 
-            valrmsd = np.array(valrmsd)
-            valrmsd = np.reshape(valrmsd, (val_batch_size, val_num_samples))
-            valrmsd_mean = np.mean(valrmsd, axis=1)
-            valrmsd_std = np.std(valrmsd, axis=1)
+            rmsds = np.array(rmsds)
+            rmsds = np.reshape(rmsds, (val_batch_size, val_num_samples))
+            rmsds_mol_mean[start_:end_] = np.mean(rmsds, axis=1)
+            rmsds_mol_std[start_:end_] = np.std(rmsds, axis=1)
 
-            valscores_mean[start_:end_] = valrmsd_mean
-            valscores_std[start_:end_] = valrmsd_std
-
+            if savepred_path != None:
+                if not savepermol:
+                    PX_preds[start_:end_] = PX_pred.view(val_batch_size, val_num_samples, n_max, 3)
+            
             # save results per molecule if request
             if savepermol:
-                pred_curr = copy.deepcopy(X_pred).view(val_batch_size, val_num_samples, n_max, 3)
-                for tt in range(0, val_batch_size):
-                    save_dict_tt = {'rmsd': valrmsd[tt], 'pred': pred_curr[tt]}
-                    pkl.dump(save_dict_tt, \
-                        open(os.path.join(savepred_path, 'mol_{}_neuralnet.p'.format(tt+start_)), 'wb'))
+                curr_X_preds = copy.deepcopy(X_pred).view(val_batch_size, val_num_samples, n_max, 3)
+                for mol_i in range(0, val_batch_size):
+                    save_dict_mol = {'rmsd': rmsds[mol_i], 'pred': curr_X_preds[mol_i]}
+                    pkl.dump(save_dict_mol, \
+                        open(os.path.join(savepred_path, 'mol_{}_refined.p'.format(mol_i+start_)), 'wb'))
 
-        print ("val scores: mean is {} , std is {}".format(np.mean(valscores_mean), np.mean(valscores_std)))
+        print ("val scores: mean is {} , std is {}".format(np.mean(rmsds_mol_mean), np.mean(rmsds_mol_std)))
+        
         if savepred_path != None:
             if not savepermol:
                 print ("saving neural net predictions into {}".format(savepred_path))
-                pkl.dump(pred_v, open(savepred_path, 'wb'))
+                pkl.dump(PX_preds, open(savepred_path + 'PX_preds', 'wb'))
 
-        return np.mean(valscores_mean), np.mean(valscores_std)
+        return np.mean(rmsds_mol_mean), np.mean(rmsds_mol_std)
