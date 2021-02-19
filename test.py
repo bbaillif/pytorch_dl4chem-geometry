@@ -7,7 +7,7 @@ import os
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-def test(model, test_loader, molsup_val, val_num_samples=10, savepred_path='save_generated_mols/', savepermol=True, \
+def test(model, test_loader, val_num_samples=10, savepred_path='save_generated_mols/', savepermol=True, \
          refine_steps=0, useFF=False, device='cpu'):
     
     def pos_to_proximity(pos, mask):
@@ -100,7 +100,7 @@ def test(model, test_loader, molsup_val, val_num_samples=10, savepred_path='save
             start_ = batch_idx * val_batch_size
             end_ = start_ + val_batch_size
             
-            nodes, masks, edges, proximity, pos = batch #D1 D2 D3 D4 D5
+            nodes, masks, edges, proximity, pos, mols = batch #D1 D2 D3 D4 D5
             nodes = nodes.to(device)
             masks = masks.to(device)
             edges = edges.to(device)
@@ -127,8 +127,8 @@ def test(model, test_loader, molsup_val, val_num_samples=10, savepred_path='save
 
             rmsds=[]
             for j in range(X_pred.shape[0]):
-                ms_v_index = int(j / val_num_samples) + start_
-                rmsd = getRMSD(molsup_val[ms_v_index], X_pred[j], useFF)
+                ms_v_index = int(j / val_num_samples)
+                rmsd = getRMSD(mols[ms_v_index], X_pred[j], useFF)
                 rmsds.append(rmsd)
 
             rmsds = np.array(rmsds)
@@ -156,3 +156,34 @@ def test(model, test_loader, molsup_val, val_num_samples=10, savepred_path='save
                 pkl.dump(PX_preds, open(savepred_path + 'PX_preds', 'wb'))
 
         return np.mean(rmsds_mol_mean), np.mean(rmsds_mol_std)
+    
+    
+    def getRMS(self, prb_mol, ref_pos, useFF=False):
+
+        def optimizeWithFF(mol):
+
+            molf = Chem.AddHs(mol, addCoords=True)
+            AllChem.MMFFOptimizeMolecule(molf)
+            molf = Chem.RemoveHs(molf)
+
+            return molf
+
+        n_est = prb_mol.GetNumAtoms()
+
+        ref_cf = Chem.rdchem.Conformer(n_est)
+        for k in range(n_est):
+            ref_cf.SetAtomPosition(k, ref_pos[k].tolist())
+
+        ref_mol = copy.deepcopy(prb_mol)
+        ref_mol.RemoveConformer(0)
+        ref_mol.AddConformer(ref_cf)
+
+        if useFF:
+            try:
+                res = AllChem.AlignMol(prb_mol, optimizeWithFF(ref_mol))
+            except:
+                res = AllChem.AlignMol(prb_mol, ref_mol)
+        else:
+            res = AllChem.AlignMol(prb_mol, ref_mol)
+
+        return res

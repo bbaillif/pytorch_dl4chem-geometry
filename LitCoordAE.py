@@ -1,18 +1,27 @@
 import torch
+import copy
+import numpy as np
 
 from torch import nn
+from pytorch_lightning.core.lightning import LightningModule
+from torch.optim import Adam
+from MSDScorer import MSDScorer
+from KLDLoss import KLDLoss
+
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
 # Naming of variables (ie original nodes embed vs nodes embed), keep the same terminology
 
 # 3D Coordinates autoencoder model
-class CoordAE(nn.Module):
+class LitCoordAE(LightningModule):
 
     def __init__(self, n_max, dim_node, dim_edge, dim_h, dim_f, \
-                batch_size, mpnn_steps=5, alignment_type='default', tol=1e-5, \
-                use_X=True, use_R=True, seed=0, \
-                refine_steps=0, refine_mom=0.99):
+                batch_size, mpnn_steps=5, alignment_type='kabsch2', \
+                use_X=True, use_R=True, useFF=False, w_reg = 1e-5, \
+                refine_steps=0, refine_mom=0.99, val_num_samples=10):
         
-        super(CoordAE, self).__init__()
+        super(LitCoordAE, self).__init__()
         
         self.mpnn_steps = mpnn_steps
         self.n_max = n_max
@@ -21,11 +30,15 @@ class CoordAE(nn.Module):
         self.dim_h = dim_h
         self.dim_f = dim_f
         self.batch_size = batch_size
-        self.tol = tol
+        self.val_num_samples = val_num_samples
         self.refine_steps = refine_steps
         self.refine_mom = refine_mom
         self.use_X = use_X # Include position in the node embedding
         self.use_R = use_R # Include distance in the edge embedding
+        self.kldloss = KLDLoss()
+        self.msd_scorer = MSDScorer(alignment_type=alignment_type)
+        self.useFF = useFF
+        self.w_reg = w_reg
             
         #self.G not included
         #placeholders not included
@@ -56,15 +69,10 @@ class CoordAE(nn.Module):
         self.mpnn_post_x = MPNN(batch_size, n_max, dim_h, mpnn_steps)
         self.latent_nn_post_x = LatentNN(batch_size, n_max, dim_h, dim_f, 3)
         
-        # Post X det
-#         self.edge_nn_post_x_det = EdgeNN(batch_size, n_max, dim_edge + 1, dim_h)
-#         self.mpnn_post_x_det = MPNN(batch_size, n_max, dim_h, mpnn_steps)
-#         self.latent_nn_post_x_det = LatentNN(batch_size, n_max, dim_h, dim_f, 3)
-        
-        # Pred X
-        self.edge_nn_pred_x = EdgeNN(batch_size, n_max, dim_edge + 1, dim_h)
-        self.mpnn_pred_x = MPNN(batch_size, n_max, dim_h, mpnn_steps)
-        self.latent_nn_pred_x = LatentNN(batch_size, n_max, dim_h, dim_f, 3)
+#         # Pred X
+#         self.edge_nn_pred_x = EdgeNN(batch_size, n_max, dim_edge + 1, dim_h)
+#         self.mpnn_pred_x = MPNN(batch_size, n_max, dim_h, mpnn_steps)
+#         self.latent_nn_pred_x = LatentNN(batch_size, n_max, dim_h, dim_f, 3)
         
     def forward(self, nodes, masks, edges, proximity, pos) :
 
@@ -135,12 +143,138 @@ class CoordAE(nn.Module):
 
         # Prediction of X with p(Z|G) in the test phase
 
-        PX_edge_wgt = self.edge_nn_pred_x(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
-        PX_hidden = self.mpnn_pred_x(PX_edge_wgt, priorZ_sample + nodes_embed, masks)
-        PX_pred = self.latent_nn_pred_x(PX_hidden, nodes_embed, masks)
+#         PX_edge_wgt = self.edge_nn_pred_x(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
+#         PX_hidden = self.mpnn_pred_x(PX_edge_wgt, priorZ_sample + nodes_embed, masks)
+#         PX_pred = self.latent_nn_pred_x(PX_hidden, nodes_embed, masks)
+
+        PX_edge_wgt = self.edge_nn_post_x(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
+        PX_hidden = self.mpnn_post_x(PX_edge_wgt, priorZ_sample + nodes_embed, masks)
+        PX_pred = self.latent_nn_post_x(PX_hidden, nodes_embed, masks)
 
         return postZ_mu, postZ_lsgms, priorZ_mu, priorZ_lsgms, X_pred, PX_pred
 
+    
+    def training_step(self, batch, batch_idx):
+        
+        tensors, mols = batch
+        nodes, masks, edges, proximity, pos = tensors
+        #masks = masks.unsqueeze(-1)
+        
+        postZ_mu, postZ_lsgms, priorZ_mu, priorZ_lsgms, X_pred, PX_pred = self(nodes, masks, edges, proximity, pos)
+        
+        cost_KLDZ = torch.mean(torch.sum(self.kldloss.loss(masks, postZ_mu, postZ_lsgms,  priorZ_mu, priorZ_lsgms), (1, 2))) # posterior | prior
+        cost_KLD0 = torch.mean(torch.sum(self.kldloss.loss(masks, priorZ_mu, priorZ_lsgms), (1, 2))) # prior | N(0,1)
+        cost_X = torch.mean(self.msd_scorer.score(X_pred, pos, masks))
+        cost_op = cost_X + cost_KLDZ + self.w_reg * cost_KLD0
+
+        self.log("train/cost_op", cost_op)
+        self.log("train/cost_X", cost_X)
+        self.log("train/cost_KLDZ", cost_KLDZ)
+        self.log("train/cost_KLD0", cost_KLD0)
+        return cost_op
+    
+    
+    def validation_step(self, batch, batch_idx):
+        
+        tensors, mols = batch
+        nodes, masks, edges, proximity, pos = tensors
+        #masks = masks.unsqueeze(-1)
+
+        # repeat because we want val_batch_size (molecule) * val_num_samples (conformer per molecule)
+        nodes = torch.repeat_interleave(nodes, self.val_num_samples, dim=0)
+        masks = torch.repeat_interleave(masks, self.val_num_samples, dim=0)
+        edges = torch.repeat_interleave(edges, self.val_num_samples, dim=0)
+        proximity = torch.repeat_interleave(proximity, self.val_num_samples, dim=0)
+
+        _, _, _, _, _, PX_pred = self(nodes, masks, edges, proximity, pos)
+
+        X_pred = PX_pred
+        for r in range(self.refine_steps):
+            if use_X:
+                pos = X_pred
+            if use_R:
+                proximity = pos_to_proximity(X_pred, masks)
+            _, _, _, _, last_X_pred, _ = self(nodes, masks, edges, proximity, pos)
+            X_pred = self.refine_mom * X_pred + (1-self.refine_mom) * last_X_pred
+
+        rmsds=[]
+        for j in range(X_pred.shape[0]):
+            ms_v_index = int(j / self.val_num_samples)
+            rmsds.append(self.getRMSD(mols[ms_v_index], X_pred[j]))
+
+        rmsds = np.array(rmsds)
+
+        self.log("val/mean_rmsd", rmsds.mean())
+        self.log("val/std_rmsd", rmsds.std())
+        return rmsds.mean()
+        
+    
+    def configure_optimizers(self):
+        return Adam(self.parameters(), lr=1e-3) # original is lr=3e-4
+    
+    
+    def pos_to_proximity(self, pos, mask):
+        """ Args
+                pos : Tensor(batch_size, n_max, 3)
+                mask : Tensor(batch_size, n_max, 1)
+
+            Returns :
+                proximity : Tensor(batch_size, n_max, nmax)
+        """
+
+        pos_1 = pos.unsqueeze(2)
+        pos_2 = pos.unsqueeze(1)
+
+        pos_sub = torch.sub(pos_1, pos_2) #[batch_size, n_max, nmax, 3]
+        proximity = torch.square(pos_sub)
+        proximity = torch.sum(proximity, 3) #[batch_size, n_max, nmax]
+        proximity = torch.sqrt(proximity + 1e-5)
+
+        #proximity_view = torch.view(self.batch_size, self.n_max, self.n_max) I don't understand the rationale
+        proximity = torch.mul(proximity, mask)
+        proximity = torch.mul(proximity, mask.permute(0, 2, 1))
+
+        # set diagonal of distance matrix to 0
+        proximity[:, torch.arange(proximity.shape[1]), torch.arange(proximity.shape[2])] = 0
+
+        return proximity
+    
+    
+    def getRMSD(self, reference_mol, positions):
+        """
+        Args :
+            reference_mol : RDKit.Molecule
+            positions : Tensor(n_atom, 3)
+        """
+
+        def optimizeWithFF(mol):
+
+            mol = Chem.AddHs(mol, addCoords=True)
+            AllChem.MMFFOptimizeMolecule(mol)
+            mol = Chem.RemoveHs(mol)
+
+            return mol
+
+        n_atom = reference_mol.GetNumAtoms()
+
+        test_cf = Chem.rdchem.Conformer(n_atom)
+        for k in range(n_atom):
+            test_cf.SetAtomPosition(k, positions[k].tolist())
+
+        test_mol = copy.deepcopy(reference_mol)
+        test_mol.RemoveConformer(0)
+        test_mol.AddConformer(test_cf)
+
+        if self.useFF:
+            try:
+                rmsd = AllChem.AlignMol(reference_mol, optimizeWithFF(test_mol))
+            except:
+                rmsd = AllChem.AlignMol(reference_mol, test_mol)
+        else:
+            rmsd = AllChem.AlignMol(reference_mol, test_mol)
+
+        return rmsd
+    
     
     def _draw_sample(self, mu, lsgms, masks):
 
@@ -250,27 +384,6 @@ class MPNN(nn.Module):
 
         return nodes_embed
     
-    def _update_GRU(self, messages, nodes, mask):
-
-        """
-            Args :
-                messages : Tensor(batch_size, n_max, hidden_dim)
-                nodes : Tensor(batch_size, n_max, hidden_dim)
-                mask : Tensor(batch_size, n_max, 1)
-            Returns :
-                nodes_next : Tensor(batch_size, n_max, hidden_dim)
-        """
-
-        #messages = messages.view(self.batch_size * self.n_max, 1, self.hidden_dim) was necessary for TF as it use a channel dim for multi RNN
-        messages = messages.view(-1, self.hidden_dim) 
-        nodes = nodes.view(-1, self.hidden_dim)
-        
-        _, nodes_next = self.gru(messages, nodes)
-
-        nodes_next = nodes_next.view(-1, self.n_max, self.hidden_dim)
-        nodes_next = torch.mul(nodes_next, mask)
-
-        return nodes_next
     
     def _compute_messages(self, edge_wgt, nodes) :
         
@@ -292,6 +405,29 @@ class MPNN(nn.Module):
 
         return messages
     
+    
+    def _update_GRU(self, messages, nodes, mask):
+
+        """
+            Args :
+                messages : Tensor(batch_size, n_max, hidden_dim)
+                nodes : Tensor(batch_size, n_max, hidden_dim)
+                mask : Tensor(batch_size, n_max, 1)
+            Returns :
+                nodes_next : Tensor(batch_size, n_max, hidden_dim)
+        """
+
+        #messages = messages.view(self.batch_size * self.n_max, 1, self.hidden_dim) was necessary for TF as it use a channel dim for multi RNN
+        messages = messages.view(-1, self.hidden_dim) 
+        nodes = nodes.view(-1, self.hidden_dim)
+        
+        nodes_next = self.gru(messages, nodes)
+
+        nodes_next = nodes_next.view(-1, self.n_max, self.hidden_dim)
+        nodes_next = torch.mul(nodes_next, mask)
+
+        return nodes_next
+
 
 class LatentNN(nn.Module):
     
