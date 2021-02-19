@@ -72,7 +72,16 @@ def main(args):
                                                 dim_edge=dim_edge,
                                                 dim_h=dim_h,
                                                 dim_f=dim_f,
-                                                batch_size=batch_size)
+                                                batch_size=batch_size, 
+                                                mpnn_steps=mpnn_steps, 
+                                                alignment_type=alignment_type, 
+                                                use_X=use_X, 
+                                                use_R=use_R,
+                                                useFF=useFF,
+                                                refine_steps=refine_steps, 
+                                                refine_mom=refine_mom, 
+                                                w_reg=w_reg,
+                                                val_num_samples=val_num_samples)
 
     tb_logger = pl_loggers.TensorBoardLogger('logs/')
     trainer = Trainer(logger=tb_logger, gpus=-1, num_nodes=2, accelerator='ddp')
