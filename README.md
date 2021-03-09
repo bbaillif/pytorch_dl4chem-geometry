@@ -7,6 +7,8 @@ A first implementation was built in Pytorch, then I switched on Pytorch Lightnin
 - LitCoordAE.py contains the model and its submodules
 - data_utils.py contains the data structure to be used as input for the model (CODDataModule, CODDataset and some other extracted from [GraphInvent](https://github.com/MolecularAI/GraphINVENT/tree/master/graphinvent))
 - MSDScorer contains the various (R)MSD functions coded in the original dl4chem. The default one to be used is kabsch (which finds the reference conformation rotation to minimize RMSD between predicted and reference conformations)
+- generate_test_molecules_COD.ipynb : Notebook to generate conformations as png (2D graph) and sdf (3D conformations) for COD test set molecules. The SDF contains 5 conformations : first one is reference from COD, second is LitCoordAE generated, third is the optimized generated, fourth is the RDKIT generated and fifth is RDKIT optimized generated
+- generate_test_molecules_QM9.ipynb : old notebook to generated conformations for QM9 test set molecules. This script and the previous should be merged and adapted to handle both datasets
 
 Only 2 datasets (QM9 and COD) can be processed (use dataset preprocessing notebook). Beware as it requires at least 12 Go RAM to handle the edges data. Don't forget to change the used data directory.
 
@@ -15,11 +17,12 @@ First implementation (without Lightning) :
 - test.py (to evaluate the model, used as validation as well)  
 - reproduce_Mansimov.py to run the model  
 
-If you don't want to use Pytorch Lightning (with the trainer), you could reuse the training_step / validation_step from the LitCoordAE.py in your main script, but you need to add the optimizer.zero_grad, loss.backward, optimizer.step to ensure the model training, and .to() calls handling the device to activate cuda training if necessary (as those steps are automatically handled by Lightning)
+If you don't want to use Pytorch Lightning (with the trainer), you could reuse the training_step / validation_step from the LitCoordAE.py in your main script, but you need to add the optimizer.zero_grad, loss.backward, optimizer.step to ensure the model training, and .to() calls handling the device to activate cuda training if necessary (as those steps are automatically handled by Lightning). You also need to look the distributed training setup from Pytorch, as I use the presettings from Lightning here.
 
 TODO for improvement :
 - Better variable/class naming and harmonisation
 - Implement test_step in LitCoordAE
 - Add documentation / comment code
+- Use one script/notebook for molecule generation, and to assess performance on the test set
 
 Note : to launch the code on a computing cluster with SLURM, please refer to Pytorch Lightning documentation on [Computing cluster](https://pytorch-lightning.readthedocs.io/en/stable/clouds/slurm.html) and [Multi GPU training](https://pytorch-lightning.readthedocs.io/en/stable/advanced/multi_gpu.html), and don't forget the srun command in the sbatch script to run python.
