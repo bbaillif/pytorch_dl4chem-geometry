@@ -273,7 +273,7 @@ class LitCoordAE(LightningModule):
         parser.add_argument('--alignment_type', type=str, default='kabsch', choices=['default', 'linear', 'kabsch'])
         parser.add_argument('--seed', type=int, default=1334, help='random seed for experiments')
         parser.add_argument('--use_X', action='store_true', help='use X as input for posterior of Z')
-        parser.add_argument('--use_R', action='store_true', help='use R(X) as input for posterior of Z')
+        parser.add_argument('--use_R', action='store_true', default=True, help='use R(X) as input for posterior of Z')
         parser.add_argument('--w_reg', type=float, default=1e-5, help='weight for conditional prior regularization')
         parser.add_argument('--refine_mom', type=float, default=0.99, help='momentum used for refinement')
         parser.add_argument('--refine_steps', type=int, default=0, help='number of refinement steps if requested')
