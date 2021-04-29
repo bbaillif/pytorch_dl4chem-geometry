@@ -2,6 +2,7 @@
 # coding: utf-8
 
 import os
+import torch
 
 from test_tube import Experiment
 from pytorch_lightning import Trainer
@@ -23,6 +24,10 @@ def main(args):
         args.mpnn_steps = 3
         args.n_max = 9
         args.dim_node = 22
+    else :
+        args.mpnn_steps = 5
+        args.n_max = 50
+        args.dim_node = 35
 
     data_module = CODDataModule(dataset=args.dataset, 
                                 data_dir=data_dir, 
@@ -32,10 +37,12 @@ def main(args):
     if args.checkpoint_start is None :
         model = LitCoordAE(args)
     else :
-        model = LitCoordAE.load_from_checkpoint(args.checkpoint_start, strict=False)
+        checkpoint = torch.load(args.checkpoint_start)
+        hparams = checkpoint['hyper_parameters']
+        model = LitCoordAE.load_from_checkpoint(args.checkpoint_start, hparams=hparams, strict=False)
 
     tb_logger = pl_loggers.TensorBoardLogger('logs/')
-    trainer = Trainer.from_argparse_args(args, logger=tb_logger)
+    trainer = Trainer.from_argparse_args(args, logger=tb_logger) #, precision=16
     trainer.fit(model, data_module)
 
 

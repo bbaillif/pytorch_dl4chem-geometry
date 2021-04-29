@@ -29,11 +29,36 @@ class CODDataset(torch.utils.data.Dataset):
         positions_i = torch.from_numpy(self.positions[idx]).type(torch.float32)
         mols_i = self.mols[idx]
 
-        return (nodes_i, masks_i, edges_i, proximities_i, positions_i, mols_i)
+        print(f'nodes dataset on GPU :{nodes_i.is_cuda}')
+        return nodes_i#, masks_i, edges_i, proximities_i, positions_i#, mols_i
 
     def __len__(self):
         # returns the number of graphs in the dataset
         return self.n_graphs
+    
+    
+class MoleculeBatch:
+    def __init__(self, data):
+        transposed_data = list(zip(*data))
+        self.nodes = torch.stack(transposed_data[0], 0)
+        self.masks = torch.stack(transposed_data[1], 0)
+        self.edges = torch.stack(transposed_data[2], 0)
+        self.proximities = torch.stack(transposed_data[3], 0)
+        self.positions = torch.stack(transposed_data[4], 0)
+        self.mols = transposed_data[5]
+
+    # custom memory pinning method on custom type
+    def pin_memory(self):
+        self.nodes = self.nodes.pin_memory()
+        self.masks = self.masks.pin_memory()
+        self.edges = self.edges.pin_memory()
+        self.proximities = self.proximities.pin_memory()
+        self.positions = self.positions.pin_memory()
+        return self
+
+    @staticmethod
+    def collate_wrapper(batch):
+        return MoleculeBatch(batch)
     
     
 class CODDataModule(pl.LightningDataModule):
@@ -60,12 +85,11 @@ class CODDataModule(pl.LightningDataModule):
         self.val_num_sample = val_num_sample
         self.val_batch_size = batch_size // val_num_sample
             
-        self.molset_fname = self.data_dir + self.dataset + '_molset_' + str(self.n_max) + '.p'
         self.nodes_fname = self.data_dir + self.dataset + '_nodes_' + str(self.n_max) + '.p'
-        self.masks_fname = self.data_dir + self.dataset + '_masks_'+str(self.n_max)+'.p'
-        self.edges_fname = self.data_dir + self.dataset + '_edges_'+str(self.n_max)+'.p'
-        self.dist_mats_fname = self.data_dir + self.dataset + '_dist_mats_'+str(self.n_max)+'.p'
-        self.positions_fname = self.data_dir + self.dataset + '_positions_'+str(self.n_max)+'.p'
+        self.masks_fname = self.data_dir + self.dataset + '_masks_' + str(self.n_max)+'.p'
+        self.edges_fname = self.data_dir + self.dataset + '_edges_' + str(self.n_max)+'.p'
+        self.dist_mats_fname = self.data_dir + self.dataset + '_dist_mats_' + str(self.n_max)+'.p'
+        self.positions_fname = self.data_dir + self.dataset + '_positions_' + str(self.n_max)+'.p'
         self.molset_fname = self.data_dir + self.dataset + '_molset_' + str(self.n_max) + '.p'
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
@@ -91,19 +115,28 @@ class CODDataModule(pl.LightningDataModule):
         self.train_size = dataset_size - self.val_size - self.test_size
         
         lengths = [self.train_size, self.val_size, self.test_size]
-        self.train_dataset, self.val_dataset, self.test_dataset = random_split(self.cod_dataset, lengths)
+        self.train_dataset, self.val_dataset, self.test_dataset = random_split(self.cod_dataset, lengths, generator=torch.Generator().manual_seed(42))
 
         
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.batch_size, collate_fn=self._custom_collate) # num_workers=4, pin_memory=True
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=12, pin_memory=True) 
+        #return DataLoader(self.train_dataset, batch_size=self.batch_size, collate_fn=self._custom_collate, num_workers=12, pin_memory=True) 
+#         return DataLoader(self.train_dataset, batch_size=self.batch_size, collate_fn=MoleculeBatch.collate_wrapper,
+#                          num_workers=12, pin_memory=True)
     
     
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.val_batch_size, collate_fn=self._custom_collate)
+        return DataLoader(self.val_dataset, batch_size=self.val_batch_size, num_workers=12, pin_memory=True)
+        #return DataLoader(self.val_dataset, batch_size=self.val_batch_size, collate_fn=self._custom_collate, num_workers=12, pin_memory=True)
+#         return DataLoader(self.val_dataset, batch_size=self.val_batch_size, collate_fn=MoleculeBatch.collate_wrapper,
+#                          num_workers=12, pin_memory=True)
 
     
     def test_dataloader(self):
-        return DataLoader(self.test_dataset, batch_size=self.batch_size, collate_fn=self._custom_collate)
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, num_workers=12, pin_memory=True)
+        #return DataLoader(self.test_dataset, batch_size=self.batch_size, collate_fn=self._custom_collate, num_workers=12, pin_memory=True)
+#         return DataLoader(self.test_dataset, batch_size=self.batch_size, collate_fn=MoleculeBatch.collate_wrapper,
+#                          num_workers=12, pin_memory=True)
     
     
     def _custom_collate(self, batch):
