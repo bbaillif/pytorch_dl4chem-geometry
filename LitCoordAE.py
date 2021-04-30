@@ -41,17 +41,12 @@ class LitCoordAE(LightningModule):
                                    dim_f=self.hparams.dim_f, 
                                    dim_out=2*self.hparams.dim_h, # output is mu and sigma for each hidden variable
                                    mpnn_steps=self.hparams.mpnn_steps)
-#         self.edge_nn_prior_z = EmbedEdge(hparams.batch_size, hparams.n_max, hparams.dim_edge + 1, hparams.dim_h)
-#         self.mpnn_prior_z = MPNN(hparams.batch_size, hparams.n_max, hparams.dim_h, hparams.mpnn_steps)
-#         self.latent_nn_prior_z = LatentNN(hparams.batch_size, hparams.n_max, hparams.dim_h, hparams.dim_f, 2*hparams.dim_h)
         
         # Post Z
         if self.hparams.use_R :
             post_z_dim_edge = self.hparams.dim_edge + 2 # adding n_atom and edge distance in edge embedding
-            #self.edge_nn_post_z = EmbedEdge(hparams.batch_size, hparams.n_max, hparams.dim_edge + 2, hparams.dim_h)
         else :
             post_z_dim_edge = self.hparams.dim_edge + 1 # adding n_atom in edge embedding
-            #self.edge_nn_post_z = EmbedEdge(hparams.batch_size, hparams.n_max, hparams.dim_edge + 1, hparams.dim_h)
           
         self.post_z_core = CoreNetwork(batch_size=self.hparams.batch_size, 
                                    n_max=self.hparams.n_max, 
@@ -61,8 +56,6 @@ class LitCoordAE(LightningModule):
                                    dim_out=2*self.hparams.dim_h, 
                                    mpnn_steps=self.hparams.mpnn_steps)
         
-        #self.mpnn_post_z = MPNN(hparams.batch_size, hparams.n_max, hparams.dim_h, hparams.mpnn_steps)
-        #self.latent_nn_post_z = LatentNN(hparams.batch_size, hparams.n_max, hparams.dim_h, hparams.dim_f, 2*hparams.dim_h)
         
         # Post X
         self.post_x_core = CoreNetwork(batch_size=self.hparams.batch_size, 
@@ -73,14 +66,6 @@ class LitCoordAE(LightningModule):
                                    dim_out=3, #output is xyz coordinates
                                    mpnn_steps=self.hparams.mpnn_steps)
         
-#         self.edge_nn_post_x = EmbedEdge(hparams.batch_size, hparams.n_max, hparams.dim_edge + 1, hparams.dim_h)
-#         self.mpnn_post_x = MPNN(hparams.batch_size, hparams.n_max, hparams.dim_h, hparams.mpnn_steps)
-#         self.latent_nn_post_x = LatentNN(hparams.batch_size, hparams.n_max, hparams.dim_h, hparams.dim_f, 3)
-        
-#         # Pred X
-#         self.edge_nn_pred_x = EmbedEdge(batch_size, n_max, dim_edge + 1, dim_h)
-#         self.mpnn_pred_x = MPNN(batch_size, n_max, dim_h, mpnn_steps)
-#         self.latent_nn_pred_x = LatentNN(batch_size, n_max, dim_h, dim_f, 3)
         
     def forward(self, nodes, masks, edges, proximity, pos) :
 
@@ -96,88 +81,47 @@ class LitCoordAE(LightningModule):
         
         nodes_embed = self.embed_nodes(nodes, masks) # (batch_size, n_max, dim_h)
 
-        # Isn't there a better way to add n_atom in edge features ?
         n_atom = masks.permute(0, 2, 1).sum(2) # (batch_size, 1)
         tiled_n_atom = n_atom.view(-1, 1, 1, 1).repeat(1, self.hparams.n_max, self.hparams.n_max, 1) # (batch_size, n_max, n_max, 1)
-        edge_2 = torch.cat([edges, tiled_n_atom], 3) # (batch_size, n_max, nmax, dim_edge + 1)
+        edges = torch.cat([edges, tiled_n_atom], 3) # (batch_size, n_max, nmax, dim_edge + 1)
 
+        # q(Z|G) -- prior of Z
 
-        # p(Z|G) -- prior of Z
-#         priorZ_edge_wgt = self.edge_nn_prior_z(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
-#         priorZ_hidden = self.mpnn_prior_z(priorZ_edge_wgt, nodes_embed, masks) # (batch_size, n_max, dim_h), nodes_embed like
-#         priorZ_out = self.latent_nn_prior_z(priorZ_hidden, nodes_embed, masks) # (batch_size, n_max, 2*dim_h)
-
-        priorZ_out = self.prior_z_core(nodes_embed, edge_2, masks)
+        priorZ_out = self.prior_z_core(nodes_embed, edges, masks)
         priorZ_mu, priorZ_lsgms = priorZ_out.split([self.hparams.dim_h, self.hparams.dim_h], 2)
         priorZ_sample = self._draw_sample(priorZ_mu, priorZ_lsgms, masks) # (batch_size, n_max, dim_h)
-
 
         # q(Z|R(X),G) -- posterior of Z
 
         if self.hparams.use_R:
             proximity_view = proximity.view(-1, self.hparams.n_max, self.hparams.n_max, 1)
-            edge_cat = torch.cat([edge_2, proximity_view], 3) #[batch_size, n_max, n_max, dim_edge + 2]
-            #postZ_edge_wgt = self.edge_nn_post_z(edge_cat) #[batch_size, n_max, n_max, dim_h, dim_h]
+            edges_postZ = torch.cat([edges, proximity_view], 3) #[batch_size, n_max, n_max, dim_edge + 2]
         else:
-            edge_cat = edge_2
-            #postZ_edge_wgt = self.edge_nn_post_z(edge_2) 
+            edges_postZ = edges
             
         if self.hparams.use_X:
             nodes_pos = torch.cat([nodes, pos], 2) # (batch_size, n_max, dim_node + 3)
             nodes_pos_embed = self.embed_nodes_pos(nodes_pos, masks)
-            #postZ_hidden = self.mpnn_post_z(postZ_edge_wgt, nodes_pos_embed, masks)
         else:
             nodes_pos_embed = nodes_embed
-            #postZ_hidden = self.mpnn_post_z(postZ_edge_wgt, nodes_embed, masks)
-
-        #postZ_out = self.latent_nn_prior_z(postZ_hidden, nodes_embed, masks)
         
-        postZ_out = self.post_z_core(nodes_pos_embed, edge_cat, masks)
+        postZ_out = self.post_z_core(nodes_pos_embed, edges_postZ, masks)
         postZ_mu, postZ_lsgms = postZ_out.split([self.hparams.dim_h, self.hparams.dim_h], 2)
         postZ_sample = self._draw_sample(postZ_mu, postZ_lsgms, masks)
 
-
         # p(X|Z,G) -- posterior of X
-
-#         X_edge_wgt = self.edge_nn_post_x(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
-#         X_hidden = self.mpnn_post_x(X_edge_wgt, postZ_sample + nodes_embed, masks)
-#         X_pred = self.latent_nn_post_x(X_hidden, nodes_embed, masks)
-        X_pred = self.post_x_core(postZ_sample + nodes_embed, edge_2, masks)
-
-        # p(X|Z,G) -- posterior of X without sampling from latent space
-        # used for iterative refinement of predictions ; det stands for deterministic
-
-#         X_edge_wgt_det = self.edge_nn_post_x_det(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
-#         X_hidden_det = self.mpnn_post_x_det(X_edge_wgt_det, postZ_mu + nodes_embed, masks)
-#         X_pred_det = self.latent_nn_post_x_det(X_hidden_det, nodes_embed, masks)
-
+        X_pred = self.post_x_core(postZ_sample + nodes_embed, edges, masks)
 
         # Prediction of X with p(Z|G) in the test phase
-
-#         PX_edge_wgt = self.edge_nn_post_x(edge_2) #[batch_size, n_max, n_max, dim_h, dim_h]
-#         PX_hidden = self.mpnn_post_x(PX_edge_wgt, priorZ_sample + nodes_embed, masks)
-#         PX_pred = self.latent_nn_post_x(PX_hidden, nodes_embed, masks)
-
-        PX_pred = self.post_x_core(priorZ_sample + nodes_embed, edge_2, masks)
+        PX_pred = self.post_x_core(priorZ_sample + nodes_embed, edges, masks)
 
         return postZ_mu, postZ_lsgms, priorZ_mu, priorZ_lsgms, X_pred, PX_pred
 
     
     def training_step(self, batch, batch_idx):
         
-        nodes, masks, edges, proximity, pos = batch
-        #         tensors, mols = batch
-#         nodes, masks, edges, proximity, pos = tensors
-        
-#         nodes = batch.nodes
-#         masks = batch.masks
-#         edges = batch.edges
-#         proximity = batch.proximities
-#         pos = batch.positions
-#         mols = batch.mols
-        #masks = masks.unsqueeze(-1)
-        
-        print(nodes.is_pinned())
+        molecule_tensors, mols = batch
+        nodes, masks, edges, proximity, pos = molecule_tensors
         
         postZ_mu, postZ_lsgms, priorZ_mu, priorZ_lsgms, X_pred, PX_pred = self(nodes, masks, edges, proximity, pos)
         
@@ -195,21 +139,8 @@ class LitCoordAE(LightningModule):
     
     def validation_step(self, batch, batch_idx):
         
-        nodes = batch
-        #nodes, masks, edges, proximity, pos = batch
-        #         tensors, mols = batch
-#         nodes, masks, edges, proximity, pos = tensors
-        
-#         nodes = batch.nodes
-#         masks = batch.masks
-#         edges = batch.edges
-#         proximity = batch.proximities
-#         pos = batch.positions
-#         mols = batch.mols
-        #masks = masks.unsqueeze(-1)
-        
-        print(f'validation node pinned : {nodes.is_pinned()}')
-        print(f'validation node on GPU : {nodes.is_cuda}')
+        molecule_tensors, mols = batch
+        nodes, masks, edges, proximity, pos = molecule_tensors
 
         # repeat because we want val_batch_size (molecule) * val_num_samples (conformer per molecule)
         nodes = torch.repeat_interleave(nodes, self.hparams.val_num_samples, dim=0)
@@ -217,33 +148,28 @@ class LitCoordAE(LightningModule):
         edges = torch.repeat_interleave(edges, self.hparams.val_num_samples, dim=0)
         proximity = torch.repeat_interleave(proximity, self.hparams.val_num_samples, dim=0)
 
-        print(nodes.is_pinned())
-        
         _, _, _, _, _, PX_pred = self(nodes, masks, edges, proximity, pos)
 
-        self.log("val/mean_rmsd", 1)
-        self.log("val/std_rmsd", 1)
-        return 1
         
-#         X_pred = PX_pred
-#         for r in range(self.hparams.refine_steps):
-#             if use_X:
-#                 pos = X_pred
-#             if use_R:
-#                 proximity = pos_to_proximity(X_pred, masks)
-#             _, _, _, _, last_X_pred, _ = self(nodes, masks, edges, proximity, pos)
-#             X_pred = self.hparams.refine_mom * X_pred + (1-self.hparams.refine_mom) * last_X_pred
+        X_pred = PX_pred
+        for step in range(self.hparams.refine_steps): # implemented but never used
+            if use_X:
+                pos = X_pred
+            if use_R:
+                proximity = pos_to_proximity(X_pred, masks)
+            _, _, _, _, last_X_pred, _ = self(nodes, masks, edges, proximity, pos)
+            X_pred = self.hparams.refine_mom * X_pred + (1-self.hparams.refine_mom) * last_X_pred
 
-#         rmsds=[]
-#         for j in range(X_pred.shape[0]):
-#             ms_v_index = int(j / self.hparams.val_num_samples)
-#             rmsds.append(self.getRMSD(mols[ms_v_index], X_pred[j]))
+        rmsds=[]
+        for j in range(X_pred.shape[0]):
+            ms_v_index = int(j / self.hparams.val_num_samples)
+            rmsds.append(self.getRMSD(mols[ms_v_index], X_pred[j]))
 
-#         rmsds = np.array(rmsds)
+        rmsds = np.array(rmsds)
 
-#         self.log("val/mean_rmsd", rmsds.mean())
-#         self.log("val/std_rmsd", rmsds.std())
-#         return rmsds.mean()
+        self.log("val/mean_rmsd", rmsds.mean())
+        self.log("val/std_rmsd", rmsds.std())
+        return rmsds.mean()
         
     
     def configure_optimizers(self):

@@ -15,11 +15,9 @@ from data_utils import CODDataModule
 
 def main(args):
     
-    data_dir = '/home/bb596/rds/hpc-work/dl4chem/'
-    args.dim_edge = 10
-    
     seed_everything(args.seed)
 
+    args.dim_edge = 10
     if args.dataset == 'QM9' :
         args.mpnn_steps = 3
         args.n_max = 9
@@ -30,7 +28,7 @@ def main(args):
         args.dim_node = 35
 
     data_module = CODDataModule(dataset=args.dataset, 
-                                data_dir=data_dir, 
+                                data_dir=args.data_dir, 
                                 batch_size=args.batch_size, 
                                 val_num_sample=args.val_num_samples)
 
@@ -51,6 +49,7 @@ if __name__ == '__main__':
     parser = ArgumentParser(description='Train network')
     
     parser.add_argument('--dataset', type=str, default='QM9', choices=['COD', 'QM9', 'CSD'])
+    parser.add_argument('--data_dir', type=str, default='/home/bb596/rds/hpc-work/dl4chem/')
     parser.add_argument('--batch_size', type=int, default=20, help='batch size')
     parser.add_argument('--val_num_samples', type=int, default=10,
                         help='number of samples from prior used for validation')
