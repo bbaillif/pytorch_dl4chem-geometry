@@ -11,7 +11,7 @@ from pytorch_lightning.utilities.seed import seed_everything
 from argparse import ArgumentParser
 
 from LitCoordAE import LitCoordAE
-from data_utils import CODDataModule
+from data_utils import MoleculeDataModule
 
 def main(args):
     
@@ -22,12 +22,17 @@ def main(args):
         args.mpnn_steps = 3
         args.n_max = 9
         args.dim_node = 22
-    else :
+    elif args.dataset == 'COD' :
         args.mpnn_steps = 5
         args.n_max = 50
         args.dim_node = 35
+    else : # CSD or will lead to error
+        args.mpnn_steps = 5
+        args.n_max = 50
+        args.dim_node = 98
+    
 
-    data_module = CODDataModule(dataset=args.dataset, 
+    data_module = MoleculeDataModule(dataset=args.dataset, 
                                 data_dir=args.data_dir, 
                                 batch_size=args.batch_size, 
                                 val_num_sample=args.val_num_samples)

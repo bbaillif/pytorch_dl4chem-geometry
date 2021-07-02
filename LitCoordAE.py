@@ -93,13 +93,13 @@ class LitCoordAE(LightningModule):
 
         # q(Z|R(X),G) -- posterior of Z
 
-        if self.hparams.use_R:
+        if self.hparams.use_R: # embed distance in the posterior space
             proximity_view = proximity.view(-1, self.hparams.n_max, self.hparams.n_max, 1)
             edges_postZ = torch.cat([edges, proximity_view], 3) #[batch_size, n_max, n_max, dim_edge + 2]
         else:
             edges_postZ = edges
             
-        if self.hparams.use_X:
+        if self.hparams.use_X: # embed positions in the posterior space
             nodes_pos = torch.cat([nodes, pos], 2) # (batch_size, n_max, dim_node + 3)
             nodes_pos_embed = self.embed_nodes_pos(nodes_pos, masks)
         else:
@@ -122,6 +122,9 @@ class LitCoordAE(LightningModule):
         
         molecule_tensors, mols = batch
         nodes, masks, edges, proximity, pos = molecule_tensors
+
+        if masks.ndim < 3 : # to account for default collate behaviour of removing the last dimension if shape is 1
+            masks = masks.unsqueeze(-1)
         
         postZ_mu, postZ_lsgms, priorZ_mu, priorZ_lsgms, X_pred, PX_pred = self(nodes, masks, edges, proximity, pos)
         
@@ -142,21 +145,25 @@ class LitCoordAE(LightningModule):
         molecule_tensors, mols = batch
         nodes, masks, edges, proximity, pos = molecule_tensors
 
+        if masks.ndim < 3 : # to account for default collate behaviour of removing the last dimension if shape is 1
+            masks = masks.unsqueeze(-1)
+
         # repeat because we want val_batch_size (molecule) * val_num_samples (conformer per molecule)
         nodes = torch.repeat_interleave(nodes, self.hparams.val_num_samples, dim=0)
         masks = torch.repeat_interleave(masks, self.hparams.val_num_samples, dim=0)
         edges = torch.repeat_interleave(edges, self.hparams.val_num_samples, dim=0)
-        proximity = torch.repeat_interleave(proximity, self.hparams.val_num_samples, dim=0)
+        proximity = torch.repeat_interleave(proximity, self.hparams.val_num_samples, dim=0) 
+        # pos is useless to obtain PX_pred
 
         _, _, _, _, _, PX_pred = self(nodes, masks, edges, proximity, pos)
 
         
         X_pred = PX_pred
         for step in range(self.hparams.refine_steps): # implemented but never used
-            if use_X:
+            if self.use_X:
                 pos = X_pred
-            if use_R:
-                proximity = pos_to_proximity(X_pred, masks)
+            if self.use_R:
+                proximity = self.pos_to_proximity(X_pred, masks)
             _, _, _, _, last_X_pred, _ = self(nodes, masks, edges, proximity, pos)
             X_pred = self.hparams.refine_mom * X_pred + (1-self.hparams.refine_mom) * last_X_pred
 
@@ -170,6 +177,71 @@ class LitCoordAE(LightningModule):
         self.log("val/mean_rmsd", rmsds.mean())
         self.log("val/std_rmsd", rmsds.std())
         return rmsds.mean()
+        
+    def generate_positions(self, nodes, masks, edges) :
+        """
+        Generate 3D coordinates from a molecule input
+            Args :
+                nodes : Tensor(batch_size, n_max, node_feature_size)
+                masks : Tensor(batch_size, n_max, 1)
+                edges : Tensor(batch_size, n_max, n_max, dim_edge)
+                pos : Tensor(batch_size, n_max, 3)
+                proximity : Tensor(batch_size, n_max, n_max) is actually a distance matrix
+            Returns :
+        """
+        # check input
+        assert nodes.shape[-2:] == (self.hparams.n_max, self.hparams.dim_node)
+        assert masks.shape[-2:] == (self.hparams.n_max, 1)
+        assert edges.shape[-3:] == (self.hparams.n_max, self.hparams.n_max, self.hparams.dim_edge)
+            
+        nodes_embed = self.embed_nodes(nodes, masks) # (batch_size, n_max, dim_h)
+        n_atom = masks.permute(0, 2, 1).sum(2) # (batch_size, 1)
+        tiled_n_atom = n_atom.view(-1, 1, 1, 1).repeat(1, self.hparams.n_max, self.hparams.n_max, 1) # (batch_size, n_max, n_max, 1)
+        edges = torch.cat([edges, tiled_n_atom], 3) # (batch_size, n_max, nmax, dim_edge + 1)
+
+        priorZ_out = self.prior_z_core(nodes_embed, edges, masks)
+        priorZ_mu, priorZ_lsgms = priorZ_out.split([self.hparams.dim_h, self.hparams.dim_h], 2)
+        priorZ_sample = self._draw_sample(priorZ_mu, priorZ_lsgms, masks) # (batch_size, n_max, dim_h)
+        
+        X_pred = self.post_x_core(priorZ_sample + nodes_embed, edges, masks)
+        
+        return X_pred
+        
+        
+    def latent_space_interpolation(self, nodes, masks, edges) :
+        """
+        Explore the latent space by adding a uniform vector from -3 to 3 to each value of
+        a molecule embedding
+        """
+        
+        n_mols = 10
+        
+        latent_spaces = torch.zeros(n_mols, self.hparams.n_max, self.hparams.dim_h)
+        for i, val_i in enumerate(np.linspace(-3, 3, n_mols)) :
+            for n in np.arange(self.hparams.n_max) :
+                latent_spaces[i][n] = torch.Tensor([val_i] * self.hparams.dim_h)
+                
+        nodes_embed = self.embed_nodes(nodes, masks) # (batch_size, n_max, dim_h)
+        n_atom = masks.permute(0, 2, 1).sum(2) # (batch_size, 1)
+        tiled_n_atom = n_atom.view(-1, 1, 1, 1).repeat(1, self.hparams.n_max, self.hparams.n_max, 1) # (batch_size, n_max, n_max, 1)
+        edges = torch.cat([edges, tiled_n_atom], 3) # (batch_size, n_max, nmax, dim_edge + 1)
+                
+        # q(Z|G) -- prior of Z
+
+        priorZ_out = self.prior_z_core(nodes_embed, edges, masks)
+        priorZ_mu, priorZ_lsgms = priorZ_out.split([self.hparams.dim_h, self.hparams.dim_h], 2)
+        priorZ_sample = self._draw_sample(priorZ_mu, priorZ_lsgms, masks) # (batch_size, n_max, dim_h)
+            
+        latent_spaces = latent_spaces.view(n_mols, self.hparams.n_max, -1)
+        masks = torch.repeat_interleave(masks, n_mols, dim=0)
+        edges = torch.repeat_interleave(edges, n_mols, dim=0)
+        
+        new_nodes = priorZ_sample + nodes_embed + latent_spaces
+        
+        X_pred = self.post_x_core(new_nodes, edges, masks)
+        X_pred = X_pred.view(n_mols, self.hparams.n_max, -1)
+        
+        return X_pred
         
     
     def configure_optimizers(self):
